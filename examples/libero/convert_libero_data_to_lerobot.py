@@ -21,7 +21,7 @@ Running this conversion script will take approximately 30 minutes.
 import shutil
 
 from lerobot.common.datasets.lerobot_dataset import LEROBOT_HOME
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+# from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 import tensorflow_datasets as tfds
 import tyro
 
@@ -100,7 +100,6 @@ def main(data_dir: str, *, push_to_hub: bool = False):
             push_videos=True,
             license="apache-2.0",
         )
-
 
 if __name__ == "__main__":
     tyro.cli(main)

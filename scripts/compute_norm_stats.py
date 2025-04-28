@@ -5,6 +5,9 @@ will compute the mean and standard deviation of the data in the dataset and save
 to the config assets directory.
 """
 
+import sys
+sys.path.append("/home/ma-user/modelarts/user-job-dir/openpi/src")
+
 import numpy as np
 import tqdm
 import tyro
@@ -13,7 +16,11 @@ import openpi.shared.normalize as normalize
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 import openpi.transforms as transforms
+import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 
+# 只用一张卡可见
+# import os
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 class RemoveStrings(transforms.DataTransformFn):
     def __call__(self, x: dict) -> dict:
@@ -42,7 +49,7 @@ def main(config_name: str, max_frames: int | None = None):
     data_config, dataset = create_dataset(config)
 
     num_frames = len(dataset)
-    shuffle = False
+    shuffle = False  # True for calculating stats on a subset of the data
 
     if max_frames is not None and max_frames < num_frames:
         num_frames = max_frames
@@ -55,14 +62,21 @@ def main(config_name: str, max_frames: int | None = None):
         shuffle=shuffle,
         num_batches=num_frames,
     )
+    # print(dataset[0])
 
     keys = ["state", "actions"]
     stats = {key: normalize.RunningStats() for key in keys}
+    
+    # print(config.assets_dirs / data_config.repo_id)
 
+    # cnt = 0
     for batch in tqdm.tqdm(data_loader, total=num_frames, desc="Computing stats"):
         for key in keys:
             values = np.asarray(batch[key][0])
             stats[key].update(values.reshape(-1, values.shape[-1]))
+        # cnt += 1
+        # if cnt >= num_frames // 100:
+        #     break
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
 

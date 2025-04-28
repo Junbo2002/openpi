@@ -3,14 +3,31 @@ import dataclasses
 import logging
 import math
 import pathlib
+import os
+# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".95"
 
 import imageio
 from libero.libero import benchmark
 from libero.libero import get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 import numpy as np
+import jax
+import jax.numpy as jnp
 from openpi_client import image_tools
 from openpi_client import websocket_client_policy as _websocket_client_policy
+
+import sys
+sys.path.append("/mnt/nas/wangjunbo/code/pi0/openpi/src")
+from openpi.models import model as _model
+from openpi.training import checkpoints as _checkpoints
+from openpi.policies import libero_policy
+from openpi.policies import policy_config as _policy_config
+from openpi.shared import download
+from openpi.training import config as _config
+from openpi.training import data_loader as _data_loader
+import openpi.transforms as _transforms
 import tqdm
 import tyro
 
@@ -24,7 +41,7 @@ class Args:
     # Model server parameters
     #################################################################################################################
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 6666
     resize_size: int = 224
     replan_steps: int = 5
 
@@ -32,7 +49,7 @@ class Args:
     # LIBERO environment-specific parameters
     #################################################################################################################
     task_suite_name: str = (
-        "libero_spatial"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+        "libero_object"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     num_trials_per_task: int = 50  # Number of rollouts per task
@@ -43,6 +60,62 @@ class Args:
     video_out_path: str = "data/libero/videos"  # Path to save videos
 
     seed: int = 7  # Random Seed (for reproducibility)
+
+
+class Client:
+    _instance = None
+    
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls, *args, **kwargs)
+        return cls._instance
+    
+    def __init__(self):
+        config = _config.get_config("pi0_libero")
+        checkpoint_dir = "/mnt/nas/wangjunbo/pi0/pi0_libero"
+        checkpoint_dir = download.maybe_download(str(checkpoint_dir))
+        
+        self.model = config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
+        
+        data_config = config.data.create(config.assets_dirs, config.model)
+        norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
+        repack_transforms = _transforms.Group()
+        default_prompt = None
+        transforms=[
+            *repack_transforms.inputs,
+            _transforms.InjectDefaultPrompt(default_prompt),
+            *data_config.data_transforms.inputs,
+            _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            *data_config.model_transforms.inputs,
+        ]
+        output_transforms=[
+            *data_config.model_transforms.outputs,
+            _transforms.Unnormalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            *data_config.data_transforms.outputs,
+            *repack_transforms.outputs,
+        ]
+        
+        self._input_transform = _transforms.compose(transforms)
+        self._output_transform = _transforms.compose(output_transforms)
+        self._rng = jax.random.key(0)
+    
+    def infer(self, obs):
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+        # Make a batch and convert to jax.Array.
+        inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        
+        self._rng, sample_rng = jax.random.split(self._rng)
+        outputs = {
+            "state": inputs["state"],
+            "actions": self.model.sample_actions(sample_rng, _model.Observation.from_dict(inputs)),
+        }
+        
+        # Unbatch and convert to np.ndarray.
+        outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+        outputs = self._output_transform(outputs)
+        
+        return outputs
 
 
 def eval_libero(args: Args) -> None:
@@ -71,6 +144,8 @@ def eval_libero(args: Args) -> None:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
 
     client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
+    # client = Client()
+    logging.info("build model")
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
@@ -165,13 +240,13 @@ def eval_libero(args: Args) -> None:
             total_episodes += 1
 
             # Save a replay video of the episode
-            suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=10,
-            )
+            # suffix = "success" if done else "failure"
+            # task_segment = task_description.replace(" ", "_")
+            # imageio.mimwrite(
+            #     pathlib.Path(args.video_out_path) / f"episode{episode_idx}_{task_segment}_{suffix}.mp4",
+            #     [np.asarray(x) for x in replay_images],
+            #     fps=30,
+            # )
 
             # Log current results
             logging.info(f"Success: {done}")
@@ -215,6 +290,23 @@ def _quat2axisangle(quat):
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    tyro.cli(eval_libero)
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    # 创建日志处理器：将日志写入到文件
+    file_handler = logging.FileHandler('./libero_object.log')  # 指定日志文件路径
+    file_handler.setLevel(logging.INFO)  # 设置文件日志级别
+
+    # 创建日志格式化器
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+
+    # 将处理器添加到日志器
+    logger.addHandler(file_handler)
+
+    # 创建一个流处理器，将日志输出到控制台
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
     
+    tyro.cli(eval_libero)

@@ -46,9 +46,10 @@ class Policy(BasePolicy):
         inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
 
         self._rng, sample_rng = jax.random.split(self._rng)
+        inputs2 = _model.Observation.from_dict(inputs)
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng, _model.Observation.from_dict(inputs), **self._sample_kwargs),
+            "actions": self._sample_actions(sample_rng, inputs2, **self._sample_kwargs),
         }
 
         # Unbatch and convert to np.ndarray.

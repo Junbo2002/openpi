@@ -20,9 +20,9 @@ class EnvMode(enum.Enum):
 @dataclasses.dataclass
 class Args:
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 6666
 
-    env: EnvMode = EnvMode.ALOHA_SIM
+    env: EnvMode = EnvMode.ALOHA
     num_steps: int = 10
 
 
